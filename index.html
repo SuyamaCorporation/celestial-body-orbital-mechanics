@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>天体 軌道 力学 シミュレーション</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col">
+<header class="bg-gray-800 px-4 py-3 shadow flex items-center justify-between">
+  <h1 class="text-xl font-bold text-yellow-400">天体 軌道 力学 シミュレーション</h1>
+  <div class="text-xs text-gray-400">Verlet 数値積分 · 万有引力</div>
+</header>
+<main class="flex flex-1 gap-4 p-4 overflow-hidden" style="height:calc(100vh - 56px)">
+  <!-- 左パネル -->
+  <aside class="w-72 flex flex-col gap-3 overflow-y-auto" aria-label="シミュレーション設定">
+    <section class="bg-gray-800 rounded-lg p-3">
+      <h2 class="text-sm font-semibold text-yellow-300 mb-2">シミュレーション制御</h2>
+      <div class="flex gap-2 mb-2">
+        <button id="start-btn"
+          class="flex-1 text-xs bg-yellow-700 hover:bg-yellow-600 rounded px-2 py-1 transition font-semibold"
+          aria-label="開始">▶ 開始</button>
+        <button id="pause-btn"
+          class="flex-1 text-xs bg-gray-700 hover:bg-gray-600 rounded px-2 py-1 transition font-semibold"
+          aria-label="一時停止">⏸ 一時停止</button>
+        <button id="reset-btn"
+          class="flex-1 text-xs bg-red-900 hover:bg-red-700 rounded px-2 py-1 transition font-semibold"
+          aria-label="リセット">↺ リセット</button>
+      </div>
+
+      <label class="text-xs text-gray-300">シミュ速度: <span id="speed-val" class="font-mono text-yellow-300">1x</span></label>
+      <input type="range" id="sim-speed" min="0.1" max="10" value="1" step="0.1"
+        class="w-full accent-yellow-400" aria-label="シミュレーション速度">
+
+      <div class="flex items-center gap-2 mt-2">
+        <input type="checkbox" id="show-trails" checked class="accent-yellow-400" aria-label="軌道軌跡表示">
+        <label for="show-trails" class="text-xs text-gray-300 cursor-pointer">軌道軌跡表示</label>
+      </div>
+    </section>
+
+    <section class="bg-gray-800 rounded-lg p-3">
+      <h2 class="text-sm font-semibold text-yellow-300 mb-2">天体追加</h2>
+      <div class="space-y-1 text-xs">
+        <label class="text-gray-300 block">名前</label>
+        <input type="text" id="add-name" value="惑星X"
+          class="w-full bg-gray-700 text-gray-100 rounded px-2 py-1 border border-gray-600 focus:border-yellow-500 focus:outline-none text-xs"
+          aria-label="天体名">
+
+        <label class="text-gray-300 block mt-1">質量 (×10²⁴kg): <span id="add-mass-val" class="font-mono text-yellow-300">1.0</span></label>
+        <input type="range" id="add-mass" min="0.1" max="50" value="1" step="0.1"
+          class="w-full accent-yellow-400" aria-label="天体質量">
+
+        <label class="text-gray-300 block mt-1">初期軌道半径 (AU): <span id="add-dist-val" class="font-mono text-yellow-300">2.0</span></label>
+        <input type="range" id="add-dist" min="0.5" max="15" value="2" step="0.1"
+          class="w-full accent-yellow-400" aria-label="軌道半径">
+      </div>
+      <button id="add-body-btn"
+        class="mt-2 w-full text-xs bg-yellow-800 hover:bg-yellow-700 rounded px-2 py-1 transition"
+        aria-label="天体を追加">天体を追加</button>
+    </section>
+
+    <section class="bg-gray-800 rounded-lg p-3">
+      <h2 class="text-sm font-semibold text-yellow-300 mb-1">天体データ</h2>
+      <div id="body-info" class="text-xs space-y-1 max-h-48 overflow-y-auto"></div>
+    </section>
+
+    <section class="bg-gray-800 rounded-lg p-3">
+      <h2 class="text-sm font-semibold text-yellow-300 mb-1">凡例</h2>
+      <div class="text-xs text-gray-400">
+        <div>バブルサイズ = 相対質量</div>
+        <div>軌跡 = 過去軌道</div>
+        <div>速度矢印 = 現在速度方向</div>
+      </div>
+    </section>
+  </aside>
+
+  <!-- Canvas -->
+  <div class="flex-1 relative bg-gray-950 rounded-lg overflow-hidden" id="canvas-wrap">
+    <canvas id="sim-canvas" class="w-full h-full"
+      role="img" aria-label="天体軌道シミュレーション表示エリア"></canvas>
+    <div id="hover-info"
+      class="absolute top-2 right-2 bg-gray-800 bg-opacity-90 border border-yellow-700 text-xs text-yellow-100 px-2 py-1 rounded hidden"
+      aria-live="polite"></div>
+  </div>
+</main>
+
+<script>
+(function() {
+  'use strict';
+
+  // Physical constants (scaled for visualization)
+  // AU = 1.496e11 m, 1 year = 3.156e7 s
+  // G in AU^3/(M_sun * yr^2) = 4*pi^2 ≈ 39.48
+  const G = 39.48; // AU^3 / (M_sun * yr^2)
+  const M_SUN = 1.0; // Solar masses
+
+  // AU, solar masses, years
+  const INITIAL_BODIES = [
+    { name: '太陽', mass: 1.0, x: 0, y: 0, vx: 0, vy: 0, r: 14, color: '#fbbf24', fixed: true, trail: [] },
+    // Orbital data: a (AU), eccentricity -> circular approx vcirc = sqrt(G*M/a)
+    { name: '水星', mass: 1.66e-7, x: 0.387, y: 0, vx: 0, vy: Math.sqrt(G * M_SUN / 0.387), r: 4, color: '#9ca3af', trail: [] },
+    { name: '金星', mass: 2.45e-6, x: 0.723, y: 0, vx: 0, vy: Math.sqrt(G * M_SUN / 0.723), r: 6, color: '#fde68a', trail: [] },
+    { name: '地球', mass: 3.0e-6, x: 1.0,   y: 0, vx: 0, vy: Math.sqrt(G * M_SUN / 1.0),   r: 6, color: '#60a5fa', trail: [] },
+    { name: '火星', mass: 3.2e-7, x: 1.524, y: 0, vx: 0, vy: Math.sqrt(G * M_SUN / 1.524), r: 5, color: '#f87171', trail: [] },
+    { name: '木星', mass: 9.55e-4, x: 5.2,  y: 0, vx: 0, vy: Math.sqrt(G * M_SUN / 5.2),  r: 11, color: '#fb923c', trail: [] },
+    { name: '土星', mass: 2.86e-4, x: 9.58, y: 0, vx: 0, vy: Math.sqrt(G * M_SUN / 9.58), r: 10, color: '#d8b4fe', trail: [] },
+  ];
+
+  function deepCopy(bodies) {
+    return bodies.map(b => ({ ...b, trail: [] }));
+  }
+
+  let bodies = deepCopy(INITIAL_BODIES);
+  let running = false;
+  let animId = null;
+  let time = 0;
+  let lastTs = null;
+  let simSpeed = 1;
+  let showTrails = true;
+  let MAX_TRAIL = 300;
+
+  const canvas = document.getElementById('sim-canvas');
+  const ctx = canvas.getContext('2d');
+  const wrap = document.getElementById('canvas-wrap');
+
+  // View: center + scale (pixels per AU)
+  let viewScale = 50; // default, will be auto-calculated
+  let viewCX = 0, viewCY = 0;
+
+  function worldToCanvas(x, y) {
+    return {
+      cx: canvas.width / 2 + (x - viewCX) * viewScale,
+      cy: canvas.height / 2 - (y - viewCY) * viewScale,
+    };
+  }
+
+  /* ---------- Verlet Integration ---------- */
+  function computeAccelerations() {
+    const acc = bodies.map(() => ({ ax: 0, ay: 0 }));
+    for (let i = 0; i < bodies.length; i++) {
+      if (bodies[i].fixed) continue;
+      for (let j = 0; j < bodies.length; j++) {
+        if (i === j) continue;
+        const dx = bodies[j].x - bodies[i].x;
+        const dy = bodies[j].y - bodies[i].y;
+        const dist2 = dx * dx + dy * dy;
+        const dist = Math.sqrt(dist2);
+        const softening = 0.01; // prevent singularity
+        const dsoft = Math.sqrt(dist2 + softening * softening);
+        const a = G * bodies[j].mass / (dsoft * dsoft * dsoft);
+        acc[i].ax += a * dx;
+        acc[i].ay += a * dy;
+      }
+    }
+    return acc;
+  }
+
+  function stepVerlet(dt) {
+    const acc = computeAccelerations();
+    // Velocity Verlet: x(t+dt) = x(t) + v(t)*dt + 0.5*a(t)*dt^2
+    //                  a(t+dt) then v(t+dt) = v(t) + 0.5*(a(t)+a(t+dt))*dt
+    for (let i = 0; i < bodies.length; i++) {
+      if (bodies[i].fixed) continue;
+      bodies[i].x += bodies[i].vx * dt + 0.5 * acc[i].ax * dt * dt;
+      bodies[i].y += bodies[i].vy * dt + 0.5 * acc[i].ay * dt * dt;
+    }
+    const acc2 = computeAccelerations();
+    for (let i = 0; i < bodies.length; i++) {
+      if (bodies[i].fixed) continue;
+      bodies[i].vx += 0.5 * (acc[i].ax + acc2[i].ax) * dt;
+      bodies[i].vy += 0.5 * (acc[i].ay + acc2[i].ay) * dt;
+    }
+    time += dt;
+
+    // update trails
+    bodies.forEach(b => {
+      if (showTrails) {
+        b.trail.push({ x: b.x, y: b.y });
+        if (b.trail.length > MAX_TRAIL) b.trail.shift();
+      } else {
+        b.trail = [];
+      }
+    });
+  }
+
+  /* ---------- Render ---------- */
+  function render() {
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = showTrails ? 'rgba(5,5,15,0.15)' : '#05050f';
+    ctx.fillRect(0, 0, W, H);
+
+    // Auto-scale: fit all bodies
+    const xs = bodies.map(b => Math.abs(b.x));
+    const ys = bodies.map(b => Math.abs(b.y));
+    const maxR = Math.max(...xs, ...ys, 1);
+    const targetScale = (Math.min(W, H) / 2 - 30) / maxR;
+    viewScale += (targetScale - viewScale) * 0.02;
+
+    // Draw trails
+    if (showTrails) {
+      bodies.forEach(b => {
+        if (b.trail.length < 2) return;
+        ctx.strokeStyle = b.color + '44';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        b.trail.forEach((pt, i) => {
+          const { cx, cy } = worldToCanvas(pt.x, pt.y);
+          if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
+        });
+        ctx.stroke();
+      });
+    }
+
+    // Draw bodies
+    bodies.forEach(b => {
+      const { cx, cy } = worldToCanvas(b.x, b.y);
+
+      // Glow
+      const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, b.r * 2);
+      grd.addColorStop(0, b.color + 'ff');
+      grd.addColorStop(1, b.color + '00');
+      ctx.fillStyle = grd;
+      ctx.beginPath(); ctx.arc(cx, cy, b.r * 2, 0, Math.PI * 2); ctx.fill();
+
+      // Body
+      ctx.fillStyle = b.color;
+      ctx.beginPath(); ctx.arc(cx, cy, b.r, 0, Math.PI * 2); ctx.fill();
+
+      // Label
+      ctx.fillStyle = '#e5e7eb';
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(b.name, cx, cy - b.r - 3);
+
+      // Velocity arrow (for non-sun)
+      if (!b.fixed) {
+        const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+        if (speed > 0) {
+          const arrowLen = Math.min(20, speed * viewScale * 0.1);
+          const nx = b.vx / speed, ny = -b.vy / speed;
+          ctx.strokeStyle = b.color + 'aa';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + nx * arrowLen, cy + ny * arrowLen);
+          ctx.stroke();
+        }
+      }
+    });
+
+    // Time display
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(`t = ${time.toFixed(2)} yr`, 8, 18);
+  }
+
+  /* ---------- Body Info ---------- */
+  function updateBodyInfo() {
+    const div = document.getElementById('body-info');
+    while (div.firstChild) div.removeChild(div.firstChild);
+    bodies.forEach((b, i) => {
+      const row = document.createElement('div');
+      row.className = 'flex items-center gap-1 border-b border-gray-700 pb-1';
+
+      const dot = document.createElement('span');
+      dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${b.color};display:inline-block;flex-shrink:0`;
+
+      const name = document.createElement('span');
+      name.className = 'w-14 text-gray-200 font-mono truncate';
+      name.textContent = b.name;
+
+      const speed = document.createElement('span');
+      const v = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+      speed.className = 'flex-1 text-yellow-300 font-mono text-right';
+      speed.textContent = v.toFixed(2) + ' AU/yr';
+
+      const dist = document.createElement('span');
+      const d = Math.sqrt(b.x * b.x + b.y * b.y);
+      dist.className = 'w-14 text-gray-400 font-mono text-right';
+      dist.textContent = d.toFixed(2) + ' AU';
+
+      if (!b.fixed && i > 0) {
+        const delBtn = document.createElement('button');
+        delBtn.textContent = '✕';
+        delBtn.className = 'text-xs w-5 h-5 rounded bg-red-900 hover:bg-red-700 ml-1';
+        delBtn.setAttribute('aria-label', `${b.name}を削除`);
+        delBtn.addEventListener('click', () => {
+          bodies.splice(i, 1);
+          updateBodyInfo();
+        });
+        row.appendChild(dot); row.appendChild(name); row.appendChild(speed); row.appendChild(dist); row.appendChild(delBtn);
+      } else {
+        row.appendChild(dot); row.appendChild(name); row.appendChild(speed); row.appendChild(dist);
+      }
+
+      div.appendChild(row);
+    });
+  }
+
+  /* ---------- Loop ---------- */
+  const DT_BASE = 0.001; // years per step
+  const STEPS_PER_FRAME = 10;
+
+  function loop(ts) {
+    if (!running) return;
+    if (lastTs === null) lastTs = ts;
+    const elapsed = (ts - lastTs) / 1000;
+    lastTs = ts;
+
+    const stepsPerFrame = Math.max(1, Math.round(STEPS_PER_FRAME * simSpeed));
+    const dt = DT_BASE * simSpeed;
+    for (let i = 0; i < stepsPerFrame; i++) stepVerlet(dt);
+
+    render();
+    if (ts % 10 < 20) updateBodyInfo(); // update info every ~10 frames
+
+    animId = requestAnimationFrame(loop);
+  }
+
+  /* ---------- Controls ---------- */
+  document.getElementById('start-btn').addEventListener('click', () => {
+    running = true;
+    lastTs = null;
+    if (!animId) animId = requestAnimationFrame(loop);
+  });
+  document.getElementById('pause-btn').addEventListener('click', () => {
+    running = false;
+    if (animId) { cancelAnimationFrame(animId); animId = null; }
+  });
+  document.getElementById('reset-btn').addEventListener('click', () => {
+    running = false;
+    if (animId) { cancelAnimationFrame(animId); animId = null; }
+    bodies = deepCopy(INITIAL_BODIES);
+    time = 0; lastTs = null;
+    ctx.fillStyle = '#05050f';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    render();
+    updateBodyInfo();
+  });
+
+  const speedSlider = document.getElementById('sim-speed');
+  speedSlider.addEventListener('input', () => {
+    simSpeed = parseFloat(speedSlider.value);
+    document.getElementById('speed-val').textContent = simSpeed.toFixed(1) + 'x';
+  });
+
+  document.getElementById('show-trails').addEventListener('change', (e) => {
+    showTrails = e.target.checked;
+    if (!showTrails) bodies.forEach(b => { b.trail = []; });
+  });
+
+  // Add body controls
+  document.getElementById('add-mass').addEventListener('input', e => {
+    document.getElementById('add-mass-val').textContent = parseFloat(e.target.value).toFixed(1);
+  });
+  document.getElementById('add-dist').addEventListener('input', e => {
+    document.getElementById('add-dist-val').textContent = parseFloat(e.target.value).toFixed(1);
+  });
+
+  const CUSTOM_COLORS = ['#a78bfa','#34d399','#fb7185','#38bdf8','#f472b6'];
+
+  document.getElementById('add-body-btn').addEventListener('click', () => {
+    const name = document.getElementById('add-name').value.trim() || '惑星X';
+    const mass = parseFloat(document.getElementById('add-mass').value) * 1e-6; // relative to sun
+    const dist = parseFloat(document.getElementById('add-dist').value);
+    const vcirc = Math.sqrt(G * M_SUN / dist);
+    const color = CUSTOM_COLORS[bodies.length % CUSTOM_COLORS.length];
+    const angle = Math.random() * Math.PI * 2;
+    bodies.push({
+      name,
+      mass,
+      x: dist * Math.cos(angle),
+      y: dist * Math.sin(angle),
+      vx: -vcirc * Math.sin(angle),
+      vy: vcirc * Math.cos(angle),
+      r: 5,
+      color,
+      fixed: false,
+      trail: [],
+    });
+    updateBodyInfo();
+  });
+
+  /* ---------- Settings persistence ---------- */
+  const STORAGE_KEY = 'orbital_sim_v1';
+  function saveSettings() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        simSpeed: speedSlider.value,
+        showTrails,
+      }));
+    } catch(e) {}
+  }
+  function loadSettings() {
+    try {
+      const d = localStorage.getItem(STORAGE_KEY);
+      if (!d) return;
+      const s = JSON.parse(d);
+      if (s.simSpeed) {
+        speedSlider.value = s.simSpeed;
+        simSpeed = parseFloat(s.simSpeed);
+        document.getElementById('speed-val').textContent = simSpeed.toFixed(1) + 'x';
+      }
+      if (s.showTrails !== undefined) {
+        showTrails = s.showTrails;
+        document.getElementById('show-trails').checked = showTrails;
+      }
+    } catch(e) {}
+  }
+  speedSlider.addEventListener('change', saveSettings);
+  document.getElementById('show-trails').addEventListener('change', saveSettings);
+  loadSettings();
+
+  /* ---------- Resize ---------- */
+  function resize() {
+    canvas.width = wrap.clientWidth;
+    canvas.height = wrap.clientHeight;
+    render();
+    updateBodyInfo();
+  }
+
+  const ro = new ResizeObserver(resize);
+  ro.observe(wrap);
+  resize();
+  updateBodyInfo();
+})();
+</script>
+</body>
+</html>
